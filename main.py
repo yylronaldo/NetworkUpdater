@@ -6,14 +6,16 @@ import requests
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                               QHBoxLayout, QLabel, QPushButton, QSpinBox, 
                               QDialog, QLineEdit, QMessageBox, QCheckBox, 
-                              QComboBox, QSystemTrayIcon, QMenu)
+                              QComboBox, QSystemTrayIcon, QMenu, QTableWidget,
+                              QTableWidgetItem, QHeaderView)
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QIcon, QAction
+from PySide6.QtGui import QIcon, QAction, QColor, QBrush
 from aliyunsdkcore.auth.credentials import AccessKeyCredential
 from aliyunsdkcore.client import AcsClient
 from aliyunsdkecs.request.v20140526.AuthorizeSecurityGroupRequest import AuthorizeSecurityGroupRequest
 from aliyunsdkecs.request.v20140526.RevokeSecurityGroupRequest import RevokeSecurityGroupRequest
 from aliyunsdkecs.request.v20140526.DescribeSecurityGroupsRequest import DescribeSecurityGroupsRequest
+from aliyunsdkecs.request.v20140526.DescribeSecurityGroupAttributeRequest import DescribeSecurityGroupAttributeRequest
 
 def resource_path(relative_path):
     """获取资源的绝对路径，支持开发环境和打包后的环境"""
@@ -208,6 +210,8 @@ class NetworkUpdater(QMainWindow):
             self.tray_icon.setToolTip(f"安全组更新器\n{message}")
 
     def init_ui(self):
+        self.resize(800, 600)
+        
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         layout = QVBoxLayout()
@@ -258,6 +262,47 @@ class NetworkUpdater(QMainWindow):
         self.status_label = QLabel("状态: 就绪")
         layout.addWidget(self.status_label)
         
+        # 添加策略列表
+        rules_label = QLabel("安全组规则列表")
+        rules_label.setStyleSheet("font-weight: bold; margin-top: 10px;")
+        layout.addWidget(rules_label)
+        
+        self.rules_table = QTableWidget()
+        self.rules_table.setColumnCount(6)
+        self.rules_table.setHorizontalHeaderLabels([
+            "规则方向", "授权策略", "协议类型", "端口范围", "授权对象", "描述"
+        ])
+        
+        # 设置表格样式
+        self.rules_table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #d0d0d0;
+                background-color: white;
+                alternate-background-color: #edf5ff;  /* 更深的蓝灰色 */
+                color: #333333;  /* 深灰色文字 */
+            }
+            QHeaderView::section {
+                background-color: #2c3e50;  /* 深蓝色背景 */
+                color: white;  /* 白色文字 */
+                padding: 6px;
+                border: none;
+                font-weight: bold;
+            }
+            QTableWidget::item {
+                padding: 4px;
+                border: none;
+            }
+        """)
+        
+        # 设置表格属性
+        self.rules_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.rules_table.horizontalHeader().setStretchLastSection(True)
+        self.rules_table.setAlternatingRowColors(True)
+        self.rules_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.rules_table.verticalHeader().setVisible(False)  # 隐藏行号
+        self.rules_table.setMinimumHeight(300)  # 设置最小高度
+        layout.addWidget(self.rules_table)
+        
         central_widget.setLayout(layout)
 
     def on_auto_delete_changed(self, state):
@@ -302,6 +347,8 @@ class NetworkUpdater(QMainWindow):
                 
             if self.sg_combo.count() > 0:
                 self.update_status("已成功加载安全组列表")
+                # 加载当前选中安全组的规则
+                self.refresh_security_rules()
                 # 如果启用了自动更新且成功获取到安全组列表，执行更新
                 if self.auto_update:
                     self.update_security_group()
@@ -313,33 +360,54 @@ class NetworkUpdater(QMainWindow):
             self.update_status(error_message)
             QMessageBox.critical(self, "错误", error_message)
 
-    def save_settings(self):
+    def refresh_security_rules(self):
+        """刷新当前安全组的规则列表"""
+        if not self.client:
+            return
+            
+        security_group_id = self.get_selected_security_group_id()
+        if not security_group_id:
+            return
+            
         try:
-            settings = {
-                'auto_delete': self.auto_delete,
-                'auto_update': self.auto_update,
-                'port': self.port_input.value()
-            }
-            keyring.set_password("network_updater", "settings", 
-                               json.dumps(settings))
-        except Exception:
-            pass  # 设置保存失败不影响主要功能
-
-    def load_settings(self):
-        try:
-            settings = keyring.get_password("network_updater", "settings")
-            if settings:
-                settings = json.loads(settings)
-                self.auto_delete = settings.get('auto_delete', True)
-                self.auto_update = settings.get('auto_update', True)
-                self.auto_delete_cb.setChecked(self.auto_delete)
-                self.auto_update_cb.setChecked(self.auto_update)
-                self.port_input.setValue(settings.get('port', 8223))
-        except Exception:
-            pass  # 设置加载失败使用默认值
-
-    def get_selected_security_group_id(self):
-        return self.sg_combo.currentData()
+            request = DescribeSecurityGroupAttributeRequest()
+            request.set_accept_format('json')
+            request.set_SecurityGroupId(security_group_id)
+            
+            response = json.loads(self.client.do_action_with_exception(request))
+            permissions = response.get('Permissions', {}).get('Permission', [])
+            
+            # 清空现有规则
+            self.rules_table.setRowCount(0)
+            
+            # 添加规则到表格
+            for i, rule in enumerate(permissions):
+                self.rules_table.insertRow(i)
+                
+                # 添加规则信息
+                items = [
+                    QTableWidgetItem(rule.get('Direction', '')),
+                    QTableWidgetItem(rule.get('Policy', '')),
+                    QTableWidgetItem(rule.get('IpProtocol', '')),
+                    QTableWidgetItem(rule.get('PortRange', '')),
+                    QTableWidgetItem(rule.get('SourceCidrIp', '') or rule.get('DestCidrIp', '')),
+                    QTableWidgetItem(rule.get('Description', ''))
+                ]
+                
+                # 如果是由本程序添加的规则，设置背景色
+                if rule.get('Description', '').startswith('由 NetworkUpdater 添加'):
+                    highlight_color = QColor(51, 153, 255, 40)  # 半透明的蓝色
+                    text_color = QColor(0, 51, 153)  # 深蓝色文字
+                    for item in items:
+                        item.setBackground(QBrush(highlight_color))
+                        item.setForeground(QBrush(text_color))
+                
+                # 将项目添加到表格
+                for j, item in enumerate(items):
+                    self.rules_table.setItem(i, j, item)
+            
+        except Exception as e:
+            self.update_status(f"获取安全组规则失败: {str(e)}")
 
     def update_security_group(self):
         if not self.client:
@@ -382,7 +450,7 @@ class NetworkUpdater(QMainWindow):
             
             success_message = f"更新成功。当前IP: {current_ip}"
             self.update_status(success_message)
-            if self.tray_icon:  # 检查托盘图标是否存在
+            if self.tray_icon:
                 self.tray_icon.showMessage(
                     "安全组更新器",
                     success_message,
@@ -390,14 +458,13 @@ class NetworkUpdater(QMainWindow):
                     2000
                 )
             
+            # 刷新规则列表
+            self.refresh_security_rules()
+            
         except Exception as e:
             error_message = f"更新安全组规则失败: {str(e)}"
             self.update_status(error_message)
             QMessageBox.critical(self, "错误", error_message)
-
-    def cleanup(self):
-        if self.auto_delete and self.current_rule:
-            self.revoke_security_group()
 
     def revoke_security_group(self):
         if not self.current_rule:
@@ -414,8 +481,39 @@ class NetworkUpdater(QMainWindow):
             self.client.do_action_with_exception(request)
             self.current_rule = None
             
+            # 刷新规则列表
+            self.refresh_security_rules()
+            
         except Exception as e:
             QMessageBox.critical(self, "错误", f"撤销安全组规则失败: {str(e)}")
+
+    def get_selected_security_group_id(self):
+        return self.sg_combo.currentData()
+
+    def save_settings(self):
+        try:
+            settings = {
+                'auto_delete': self.auto_delete,
+                'auto_update': self.auto_update,
+                'port': self.port_input.value()
+            }
+            keyring.set_password("network_updater", "settings", 
+                               json.dumps(settings))
+        except Exception:
+            pass  # 设置保存失败不影响主要功能
+
+    def load_settings(self):
+        try:
+            settings = keyring.get_password("network_updater", "settings")
+            if settings:
+                settings = json.loads(settings)
+                self.auto_delete = settings.get('auto_delete', True)
+                self.auto_update = settings.get('auto_update', True)
+                self.auto_delete_cb.setChecked(self.auto_delete)
+                self.auto_update_cb.setChecked(self.auto_update)
+                self.port_input.setValue(settings.get('port', 8223))
+        except Exception:
+            pass  # 设置加载失败使用默认值
 
     def get_public_ip(self):
         # IP检测接口列表，按优先级排序
@@ -463,6 +561,10 @@ class NetworkUpdater(QMainWindow):
         dialog = ConfigDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self.init_client()
+
+    def cleanup(self):
+        if self.auto_delete and self.current_rule:
+            self.revoke_security_group()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
